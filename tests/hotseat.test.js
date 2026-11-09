@@ -1,0 +1,44 @@
+const test=require('node:test'),assert=require('node:assert/strict');
+const Controller=require('../src/controller'),G=require('../utils/game-engine'),Clock=require('../utils/turn-clock'),Online=require('../utils/online'),Renderer=require('../src/renderer');
+
+function page(state=G.newGame(undefined,'classic')){
+ const c=Object.assign({},Controller,{data:{...Controller.data,mode:'online',waiting:true,onlineMatch:false},_alive:true,_mode:'online',_room:{roomId:'r',rev:2,waiting:true},_state:state,_history:[],_repetitionHistory:[],_clock:new Clock(),_audio:{effect(){},event(){},speak(){},cancelCountdown(){},cancelBattleQueue(){}},_token:0});
+ c.setData=patch=>Object.assign(c.data,patch);c.sync=()=>{};c.toast=()=>{};return c;
+}
+
+test('waiting friend room can switch to offline hotseat without keeping network state',async()=>{
+ const original=Online.call,calls=[];Online.call=async(...args)=>{calls.push(args);return {ok:true};};
+ try{const c=page();assert.equal(c.startHotseat(),true);await Promise.resolve();assert.equal(c._mode,'local');assert.equal(c.data.mode,'local');assert.equal(c.data.waiting,false);assert.equal(c.data.onlineMatch,false);assert.equal(c._room,null);assert.deepEqual(calls,[['cancel',{roomId:'r',rev:2}]]);}finally{Online.call=original;}
+});
+
+test('hotseat restores private dark pieces when leaving a public waiting room',()=>{
+ const privateState=G.newGame(()=>.4,'dark'),publicState={...privateState,pieces:G.displayPieces(privateState.pieces)},c=page(publicState);c.startHotseat();assert.doesNotThrow(()=>G.validate(c._state));assert.ok(c._state.pieces.some(p=>p.hidden&&p.kind));let chosen=null;for(const p of c._state.pieces){for(let y=0;y<10&&!chosen;y++)for(let x=0;x<9&&!chosen;x++)if(G.legalAttempt(c._state.pieces,p.id,{x,y},'red'))chosen={id:p.id,to:{x,y}};if(chosen)break;}assert.ok(chosen);assert.equal(c.localMove(chosen.id,chosen.to),true);
+});
+
+test('hotseat mode lets both sides move manually and never schedules AI',async()=>{
+ const c=page();c._mode='local';c.data={...c.data,mode:'local',waiting:false,onlineMatch:false};c._room=null;c._clock.start();let auto=0;c.scheduleAI=()=>{auto++;};
+ const moveFor=side=>{const piece=c._state.pieces.find(p=>p.side===side);let to=null;for(let y=0;y<10&&!to;y++)for(let x=0;x<9;x++)if(G.legalAttempt(c._state.pieces,piece.id,{x,y},side))to={x,y};return {piece,to};};
+ let m=moveFor('red');await c.onPoint({detail:{pieceId:m.piece.id,point:{x:m.piece.x,y:m.piece.y}}});await c.onPoint({detail:{pieceId:null,point:m.to}});
+ assert.equal(c._state.ply,1);assert.equal(c._state.turn,'black');
+ m=moveFor('black');await c.onPoint({detail:{pieceId:m.piece.id,point:{x:m.piece.x,y:m.piece.y}}});await c.onPoint({detail:{pieceId:null,point:m.to}});
+ assert.equal(c._state.ply,2);assert.equal(c._state.turn,'red');assert.equal(auto,0);
+});
+
+test('hotseat rotates black pieces and supports a timer-only pause',()=>{
+ const r=Object.create(Renderer.prototype);
+ assert.equal(r.pieceShouldRotate({mode:'local'},{hidden:true,side:'red',x:4,y:0}),true);
+ assert.equal(r.pieceShouldRotate({mode:'local'},{hidden:true,side:'red',x:4,y:9}),false);
+ assert.equal(r.pieceShouldRotate({mode:'local'},{hidden:false,side:'black'}),true);
+ assert.equal(r.pieceShouldRotate({mode:'ai'},{hidden:false,side:'black'}),false);
+ const rotations=[];r.ctx={save(){},restore(){},translate(){},rotate(angle){rotations.push(angle)}};r.disc=()=>{};r.orientedDisc(0,0,10,{side:'red',hidden:false,text:'兵'},{mode:'local'},false,true);assert.deepEqual(rotations,[Math.PI]);rotations.length=0;r.orientedDisc(0,0,10,{side:'black',hidden:false,text:'卒'},{mode:'local'},false,false);assert.deepEqual(rotations,[]);rotations.length=0;r.drawCapturedRegion([{text:'兵',side:'red'}],{mode:'local'},'black',10,10,5,12,3,()=>{});assert.deepEqual(rotations,[Math.PI]);
+ const c=page();c._mode='local';c.data={...c.data,mode:'local',waiting:false};c._room=null;c._clock.start();const flipped=c.data.flipped;c.flip();assert.equal(c.data.flipped,!flipped);c.togglePause();assert.equal(c.data.manualPaused,true);assert.ok(c._clock.reasons.has('manual'));c.togglePause();assert.equal(c.data.manualPaused,false);assert.equal(c._clock.reasons.has('manual'),false);
+});
+
+test('V2 board rendering keeps local mode when drawing its reduced view',()=>{
+ const savedWx=global.wx,ctx={save(){},restore(){},translate(){},scale(){},drawImage(){},setTransform(){},clearRect(){}};global.wx={createCanvas:()=>({getContext:()=>ctx})};
+ try{
+  const r=Object.create(Renderer.prototype),seen=[];r.runtime={controller:{data:{mode:'local'}}};r.ctx=ctx;r.scale=1;r.dpr=1;r.boardCache={};r._boardRasterScale=1;r.boardPoint=()=>({x:10,y:10});r.orientedDisc=(x,y,size,piece,data)=>seen.push(data);
+  r.board({pieces:[{id:'black',x:0,y:0,side:'black',text:'車',hidden:false}],flipped:false,selectedId:''},{x:0,y:0,w:720,h:800},null,Date.now());
+  assert.equal(seen.length,1);assert.equal(seen[0].mode,'local');
+ }finally{if(savedWx===undefined)delete global.wx;else global.wx=savedWx;}
+});
